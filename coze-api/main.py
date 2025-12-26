@@ -18,23 +18,34 @@ async def analyze_patent(input: FileInput):
         response.raise_for_status()
         content = response.content
         
-        # 2. 强制使用 Excel 引擎读取 (.xlsx)
-        # 注意：这里专门处理你的 Excel 格式
+        # 2. 【核心修改】智能读取：先试 Excel，失败则试 CSV
+        df = None
+        read_error = ""
+        
+        # 尝试 A: 当做 Excel 读取
         try:
             df = pd.read_excel(io.BytesIO(content), engine='openpyxl')
-        except Exception as e:
-            return {"error": f"Excel读取失败。请确保上传的是 .xlsx 文件。错误信息: {str(e)}"}
+        except Exception as e_excel:
+            read_error += f"Excel读取失败: {str(e_excel)}; "
+            # 尝试 B: 当做 UTF-8 CSV 读取
+            try:
+                df = pd.read_csv(io.BytesIO(content), encoding='utf-8')
+            except Exception as e_csv_utf8:
+                read_error += f"CSV(utf-8)读取失败: {str(e_csv_utf8)}; "
+                # 尝试 C: 当做 GBK CSV 读取
+                try:
+                    df = pd.read_csv(io.BytesIO(content), encoding='gbk')
+                except Exception as e_csv_gbk:
+                    return {"error": f"文件格式无法识别，请确保是 .xlsx 或 .csv。详细错误: {read_error}"}
 
-        # 3. 获取列名 (用于容错)
+        # 3. 开始统计
         cols = df.columns.tolist()
         total = len(df)
         
         # --- 任务一：专利概况 ---
-        # 初始化为 0
         invention = utility = design = foreign = 0
         
         if '专利类型' in cols:
-            # 转字符串，处理可能存在的空值
             pt = df['专利类型'].astype(str)
             invention = int(pt.str.contains("发明").sum())
             utility = int(pt.str.contains("实用新型").sum())
@@ -42,7 +53,6 @@ async def analyze_patent(input: FileInput):
             
         if '公开国别' in cols:
             country = df['公开国别'].astype(str)
-            # 统计不包含"中国"的行
             foreign = int(len(df[~country.str.contains("中国")]))
 
         stats = {
@@ -57,7 +67,6 @@ async def analyze_patent(input: FileInput):
         # --- 任务二：IPC 分布 ---
         ipc_data = []
         if 'IPC主分类-部' in cols and 'IPC主分类-部(释义)' in cols:
-            # 你的表头完全匹配这两个字段
             ipc_counts = df.groupby(['IPC主分类-部', 'IPC主分类-部(释义)']).size().reset_index(name='count')
             ipc_counts = ipc_counts.sort_values(by='count', ascending=False).head(10)
             ipc_data = ipc_counts.to_dict(orient='records')
@@ -65,11 +74,9 @@ async def analyze_patent(input: FileInput):
         # --- 任务三：高价值专利 (>=9) ---
         high_value_data = []
         if '合享价值度' in cols:
-            # 强制转数字，非数字变 NaN 填 0
             df['score_num'] = pd.to_numeric(df['合享价值度'], errors='coerce').fillna(0)
             high_value_df = df[df['score_num'] >= 9].copy()
             
-            # 根据你的表头，选取存在的列
             target_cols = ['标题 (中文)', '申请人', '公开（公告）号', '新兴产业分类', '合享价值度']
             final_cols = [c for c in target_cols if c in cols]
             
@@ -84,7 +91,6 @@ async def analyze_patent(input: FileInput):
             # 筛选：受让人不为空，且长度大于1
             transfer_df = df[df['受让人'].notna() & (df['受让人'].astype(str).str.len() > 1)]
             
-            # 注意：你的表头里没有"当前法律状态"，所以我去掉了这一列，防止报错
             t_cols = ['标题 (中文)', '申请人', '受让人', '公开（公告）日']
             final_t_cols = [c for c in t_cols if c in cols]
             
@@ -92,7 +98,7 @@ async def analyze_patent(input: FileInput):
 
         return {
             "message": "success",
-            "debug_columns": cols, # 调试用：把读到的列名还给你
+            "debug_columns": cols,
             "stats": stats,
             "ipc_data": ipc_data,
             "high_value_data": high_value_data,
