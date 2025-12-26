@@ -20,9 +20,15 @@ async def analyze_patent(input: FileInput):
         
         # 2. 读取 CSV (优先尝试 utf-8，失败尝试 gbk)
         try:
-            df = pd.read_csv(io.BytesIO(content), encoding='utf-8')
-        except UnicodeDecodeError:
-            df = pd.read_csv(io.BytesIO(content), encoding='gbk')
+            # 方案 A: 尝试当做 Excel 读取
+            df = pd.read_excel(io.BytesIO(content))
+        except:
+            try:
+                # 方案 B: 尝试当做 utf-8 CSV 读取
+                df = pd.read_csv(io.BytesIO(content), encoding='utf-8')
+            except UnicodeDecodeError:
+                # 方案 C: 尝试当做 gbk CSV 读取 (解决中文乱码)
+                df = pd.read_csv(io.BytesIO(content), encoding='gbk')
 
         # --- 任务一：专利概况 ---
         total = len(df)
