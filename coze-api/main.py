@@ -4,7 +4,8 @@ import pandas as pd
 import numpy as np
 
 # 初始化应用
-app = FastAPI()
+# 强制使用 3.0.2 版本，这样扣子就能读懂了
+app = FastAPI(openapi_version="3.0.2")
 
 
 # 定义扣子传给我们的数据格式
