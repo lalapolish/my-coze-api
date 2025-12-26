@@ -12,7 +12,7 @@ class FileInput(BaseModel):
 
 @app.post("/analyze_patent")
 async def analyze_patent(input: FileInput):
-    print(f">>> [Auto-Table] 开始处理: {input.file_url}")
+    print(f">>> [Split-Industry] 开始处理: {input.file_url}")
     try:
         # 1. 下载与读取
         response = requests.get(input.file_url)
@@ -28,16 +28,14 @@ async def analyze_patent(input: FileInput):
                 df = pd.read_csv(io.BytesIO(content), encoding='gbk')
 
         if df is None:
-            return {"markdown_report": "❌ 文件读取失败，请检查格式。"}
+            return {"markdown_report": "❌ 文件读取失败"}
 
         # 清洗列名
         df.columns = df.columns.astype(str).str.strip()
         cols = df.columns.tolist()
         total = len(df)
 
-        # ==================== 1. 计算逻辑 (保持不变) ====================
-        
-        # A. 专利概况
+        # ==================== 1. 基础统计 ====================
         inv_auth = inv_app = utility = design = foreign = 0
         if '专利类型' in cols:
             pt = df['专利类型'].astype(str)
@@ -49,7 +47,7 @@ async def analyze_patent(input: FileInput):
             country = df['公开国别'].astype(str)
             foreign = int(len(df[~country.str.contains("中国")]))
 
-        # B. IPC
+        # ==================== 2. IPC 分布 ====================
         ipc_rows = []
         if 'IPC主分类-部' in cols:
             group_cols = ['IPC主分类-部']
@@ -65,27 +63,67 @@ async def analyze_patent(input: FileInput):
                 desc = row['IPC主分类-部(释义)'] if 'IPC主分类-部(释义)' in cols else ""
                 ipc_rows.append([sec, desc, row['count'], row['percent']])
 
-        # C. 高价值
+        # ==================== 3. 高价值 (核心修改：支持多分类拆分) ====================
         hv_rows = []
         if '合享价值度' in cols:
             df['score_num'] = pd.to_numeric(df['合享价值度'], errors='coerce').fillna(0)
+            # 筛选 >= 9
             hv_df = df[df['score_num'] >= 9].copy()
-            if '新兴产业分类' in cols:
-                ind_counts = hv_df['新兴产业分类'].value_counts()
-                hv_df['新兴产业分类_fmt'] = hv_df['新兴产业分类'].apply(lambda x: f"{x} ({ind_counts.get(x,0)}件)")
-                hv_df = hv_df.sort_values(by='新兴产业分类', ascending=False)
             
-            target_cols = ['新兴产业分类_fmt' if '新兴产业分类' in cols else '新兴产业分类', 
-                           '公开（公告）号', '标题 (中文)', '发明人']
-            
-            for _, row in hv_df.iterrows():
-                vals = []
-                for t in target_cols:
-                    val = str(row.get(t, "")) if pd.notna(row.get(t, "")) else ""
-                    vals.append(val)
-                hv_rows.append(vals)
+            if '新兴产业分类' in cols and not hv_df.empty:
+                # A. 预处理：把中文逗号、分号都换成英文逗号，方便统一拆分
+                # 比如: "9.1 (xx); 1.4 (yy)" -> "9.1 (xx), 1.4 (yy)"
+                hv_df['temp_industry'] = hv_df['新兴产业分类'].astype(str).str.replace(';', ',').str.replace('，', ',')
+                
+                # B. 拆分 (Split) 成列表
+                hv_df['temp_industry_list'] = hv_df['temp_industry'].str.split(',')
+                
+                # C. 炸裂 (Explode): 一行变多行！
+                # 如果一个专利有3个分类，这里就会变成3行，确保每个分类都能统计到
+                hv_exploded = hv_df.explode('temp_industry_list')
+                
+                # D. 清洗: 去除空格，过滤空值
+                hv_exploded['single_industry'] = hv_exploded['temp_industry_list'].str.strip()
+                hv_exploded = hv_exploded[
+                    (hv_exploded['single_industry'].notna()) & 
+                    (hv_exploded['single_industry'] != '') & 
+                    (hv_exploded['single_industry'] != 'nan')
+                ]
+                
+                # E. 统计拆分后的数量
+                ind_counts = hv_exploded['single_industry'].value_counts()
+                
+                # F. 格式化名称: "产业名 (N件)"
+                hv_exploded['industry_fmt'] = hv_exploded['single_industry'].apply(
+                    lambda x: f"{x} ({ind_counts.get(x, 0)}件)"
+                )
+                
+                # G. 排序: 先按产业名聚类，再按公开号排序
+                hv_exploded = hv_exploded.sort_values(by=['industry_fmt', '公开（公告）号'], ascending=[True, False])
+                
+                # H. 提取输出数据
+                # 注意：这里我们取 hv_exploded (炸裂后的表)
+                target_map = {
+                    '公开号': '公开（公告）号',
+                    '标题': '标题 (中文)',
+                    '发明人': '发明人'
+                }
+                
+                for _, row in hv_exploded.iterrows():
+                    vals = []
+                    # 第一列：带数量的产业名
+                    vals.append(row['industry_fmt'])
+                    
+                    # 后续列
+                    for k, v in target_map.items():
+                        if v in cols:
+                            val = str(row.get(v, "")) if pd.notna(row.get(v)) else ""
+                            vals.append(val)
+                        else:
+                            vals.append("")
+                    hv_rows.append(vals)
 
-        # D. 转让
+        # ==================== 4. 转让情况 ====================
         tf_rows = []
         if '受让人' in cols:
             tf_df = df[df['受让人'].notna() & (df['受让人'].astype(str).str.len() > 1)]
@@ -97,8 +135,7 @@ async def analyze_patent(input: FileInput):
                     vals.append(val)
                 tf_rows.append(vals)
 
-        # ==================== 2. 生成 Markdown 表格字符串 ====================
-        
+        # ==================== 生成 Markdown ====================
         md = "### 1. 专利概况\n"
         md += "| 指标 | 数量 |\n| :--- | :--- |\n"
         md += f"| 申请总量 | {total} |\n"
@@ -126,7 +163,6 @@ async def analyze_patent(input: FileInput):
             md += f"| {r[0]} | {r[1]} | {r[2]} | {r[3]} |\n"
 
         print(f">>> 报告生成完毕，长度: {len(md)}")
-        # 核心：只返回一个长字符串
         return {"markdown_report": md}
 
     except Exception as e:
