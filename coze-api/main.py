@@ -16,7 +16,7 @@ app = FastAPI(openapi_version="3.0.2")
 # ==========================================
 # 🛠️ 核心修复：强制加载本地 simhei.ttf 字体
 # ==========================================
-font_path = 'simhei.ttf' # 字体文件名
+font_path = 'SimHei.ttf' # 字体文件名
 
 # 1. 检查字体文件是否存在
 if os.path.exists(font_path):
