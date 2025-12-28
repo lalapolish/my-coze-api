@@ -7,6 +7,7 @@ import requests
 import matplotlib.pyplot as plt
 from wordcloud import WordCloud
 import base64
+import traceback
 
 # 设置字体 (为同学们的画图功能做准备)
 plt.rcParams['font.sans-serif'] = ['SimHei', 'Arial Unicode MS', 'Microsoft YaHei']
@@ -36,8 +37,7 @@ def plot_to_base64(fig):
 @app.post("/analyze_patent")
 async def analyze_patent(input: FileInput):
     print(f">>> [YOUR BOT] 处理表格请求: {input.file_url}")
-    # ... 这里是你原本完美的表格逻辑 ...
-    # (为了节省篇幅，这里直接调用下方的通用处理，但只返回表格Markdown)
+    # 这里的 mode="table_only" 保证了不画图，只出表格
     return await process_data(input.file_url, mode="table_only")
 
 # ==========================================
@@ -47,13 +47,14 @@ async def analyze_patent(input: FileInput):
 @app.post("/analyze_visual")
 async def analyze_visual(input: FileInput):
     print(f">>> [CLASSMATE BOT] 处理可视化请求: {input.file_url}")
-    # 这里会返回带有图片的 Markdown
+    # 这里的 mode="with_visual" 会触发画图逻辑
     return await process_data(input.file_url, mode="with_visual")
 
 # ==========================================
 # ⚙️ 核心处理逻辑 (共用的大脑)
 # ==========================================
 async def process_data(file_url, mode):
+    # 【修复点】：try 必须配合 except 使用
     try:
         response = requests.get(file_url)
         content = response.content
@@ -148,7 +149,9 @@ async def process_data(file_url, mode):
         hv_rows = []
         if '合享价值度' in cols:
             df['score_num'] = pd.to_numeric(df['合享价值度'], errors='coerce').fillna(0)
+            # 筛选：分数>=9 且 包含“授权”
             hv_df = df[(df['score_num'] >= 9) & (df['专利类型'].astype(str).str.contains("授权"))].copy()
+            
             if '新兴产业分类' in cols and not hv_df.empty:
                 hv_df['temp_industry'] = hv_df['新兴产业分类'].astype(str).str.replace(';', ',').str.replace('，', ',')
                 hv_df['temp_industry_list'] = hv_df['temp_industry'].str.split(',')
@@ -208,3 +211,8 @@ async def process_data(file_url, mode):
             md3 += f"| {r[0]} | {r[1]} | {r[2]} | {r[3]} |\n"
 
         return {"report_part1": md1, "report_part2": md2, "report_part3": md3}
+
+    # 【这里就是刚才漏掉的尾巴！】
+    except Exception as e:
+        traceback.print_exc()
+        return {"report_part1": f"❌ 处理出错: {str(e)}", "report_part2": "", "report_part3": ""}
