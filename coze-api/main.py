@@ -5,18 +5,35 @@ import numpy as np
 import io
 import requests
 import matplotlib.pyplot as plt
+from matplotlib import font_manager # 引入字体管理器
 from wordcloud import WordCloud
 import base64
 import traceback
-
-# === 配置区域 ===
-# 设置中文字体
-plt.rcParams['font.sans-serif'] = ['SimHei', 'Arial Unicode MS', 'Microsoft YaHei']
-plt.rcParams['axes.unicode_minus'] = False
-# 设置绘图分辨率 (降低 DPI 以减小 Base64 大小)
-PLOT_DPI = 75 
+import os
 
 app = FastAPI(openapi_version="3.0.2")
+
+# ==========================================
+# 🛠️ 核心修复：强制加载本地 simhei.ttf 字体
+# ==========================================
+font_path = 'simhei.ttf' # 字体文件名
+
+# 1. 检查字体文件是否存在
+if os.path.exists(font_path):
+    print(f">>> 发现本地字体文件: {font_path}，正在加载...")
+    # 2. 强行把这个文件注册到 matplotlib 的字体库里
+    font_manager.fontManager.addfont(font_path)
+    # 3. 设置全局字体为 SimHei
+    plt.rcParams['font.family'] = 'SimHei'
+else:
+    print(f">>> ⚠️ 警告: 未找到 {font_path}，中文可能会显示为乱码或方框！")
+    # 如果没找到，回退到默认字体，防止报错 crash
+    plt.rcParams['font.family'] = 'sans-serif'
+
+# 解决负号显示问题
+plt.rcParams['axes.unicode_minus'] = False 
+# 设置绘图分辨率 (降低 DPI 以减小 Base64 大小)
+PLOT_DPI = 75 
 
 class FileInput(BaseModel):
     file_url: str
@@ -25,7 +42,6 @@ class FileInput(BaseModel):
 def plot_to_base64(fig):
     try:
         buf = io.BytesIO()
-        # 关键修改：加入 dpi 参数，控制输出图片大小
         fig.savefig(buf, format='png', bbox_inches='tight', dpi=PLOT_DPI)
         buf.seek(0)
         img_base64 = base64.b64encode(buf.read()).decode('utf-8')
@@ -36,7 +52,6 @@ def plot_to_base64(fig):
 
 # ==========================================
 # 🏠 窗口 A：纯净表格版 (你的)
-# 接口: /analyze_patent
 # ==========================================
 @app.post("/analyze_patent")
 async def analyze_patent(input: FileInput):
@@ -45,7 +60,6 @@ async def analyze_patent(input: FileInput):
 
 # ==========================================
 # 🎨 窗口 B：可视化版 (带图的)
-# 接口: /analyze_visual
 # ==========================================
 @app.post("/analyze_visual")
 async def analyze_visual(input: FileInput):
@@ -104,10 +118,9 @@ async def process_data(file_url, mode):
                 desc = row['IPC主分类-部(释义)'] if 'IPC主分类-部(释义)' in cols else ""
                 ipc_rows.append([sec, desc, row['count'], row['percent_str']])
             
-            # === 画饼图 (缩小尺寸) ===
+            # === 画饼图 (修复中文) ===
             if mode == "with_visual":
                 try:
-                    # 修改：将尺寸从 (6,6) 缩小到 (4,4)
                     fig, ax = plt.subplots(figsize=(4, 4))
                     labels = []
                     for i, row in ipc_counts.iterrows():
@@ -115,10 +128,14 @@ async def process_data(file_url, mode):
                         if 'IPC主分类-部(释义)' in cols:
                             label += f": {str(row['IPC主分类-部(释义)'])}"
                         labels.append(label)
+                    
+                    # 这里的 labels 会自动应用我们在开头设置的全局字体 SimHei
                     ax.pie(ipc_counts['count'], labels=labels, autopct='%1.1f%%', startangle=90)
                     ax.set_title('IPC 主分类分布占比', fontsize=10)
                     ipc_pie_img = plot_to_base64(fig)
-                except: pass
+                except Exception as e:
+                    print(f"Pie Chart Error: {e}")
+                    pass
 
         # 3. 发明人 & 词云
         inv_rows = []
@@ -133,21 +150,27 @@ async def process_data(file_url, mode):
             for i, row in inv_counts.head(20).iterrows():
                 inv_rows.append([row['name'], row['count']])
             
-            # === 画词云 (缩小尺寸) ===
+            # === 画词云 (修复中文) ===
             if mode == "with_visual":
                 try:
                     inv_freq_dict = inv_exploded.value_counts().to_dict()
                     if inv_freq_dict:
-                        # 修改：减小画布分辨率
-                        wc = WordCloud(font_path='simhei.ttf', width=500, height=300, background_color='white')
-                        wc.generate_from_frequencies(inv_freq_dict)
-                        # 修改：将绘图尺寸从 (8,4) 缩小到 (5,3)
-                        fig_cloud, ax_cloud = plt.subplots(figsize=(5, 3))
-                        ax_cloud.imshow(wc, interpolation='bilinear')
-                        ax_cloud.axis('off')
-                        ax_cloud.set_title('主要发明人词云', fontsize=10)
-                        inv_cloud_img = plot_to_base64(fig_cloud)
-                except: pass
+                        # 再次确认字体路径存在
+                        wc_font_path = 'simhei.ttf' if os.path.exists('simhei.ttf') else None
+                        
+                        if wc_font_path:
+                            wc = WordCloud(font_path=wc_font_path, width=500, height=300, background_color='white')
+                            wc.generate_from_frequencies(inv_freq_dict)
+                            fig_cloud, ax_cloud = plt.subplots(figsize=(5, 3))
+                            ax_cloud.imshow(wc, interpolation='bilinear')
+                            ax_cloud.axis('off')
+                            ax_cloud.set_title('主要发明人词云', fontsize=10)
+                            inv_cloud_img = plot_to_base64(fig_cloud)
+                        else:
+                            print("WordCloud Error: Font file not found")
+                except Exception as e:
+                    print(f"WordCloud Error: {e}")
+                    pass
 
         # 4. 高价值
         hv_rows = []
