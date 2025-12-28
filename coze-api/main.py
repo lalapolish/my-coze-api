@@ -9,20 +9,24 @@ from wordcloud import WordCloud
 import base64
 import traceback
 
-# 设置字体 (为同学们的画图功能做准备)
+# === 配置区域 ===
+# 设置中文字体
 plt.rcParams['font.sans-serif'] = ['SimHei', 'Arial Unicode MS', 'Microsoft YaHei']
 plt.rcParams['axes.unicode_minus'] = False
+# 设置绘图分辨率 (降低 DPI 以减小 Base64 大小)
+PLOT_DPI = 75 
 
 app = FastAPI(openapi_version="3.0.2")
 
 class FileInput(BaseModel):
     file_url: str
 
-# === 辅助工具：图片转Base64 ===
+# === 辅助工具：图片转Base64 (瘦身版) ===
 def plot_to_base64(fig):
     try:
         buf = io.BytesIO()
-        fig.savefig(buf, format='png', bbox_inches='tight')
+        # 关键修改：加入 dpi 参数，控制输出图片大小
+        fig.savefig(buf, format='png', bbox_inches='tight', dpi=PLOT_DPI)
         buf.seek(0)
         img_base64 = base64.b64encode(buf.read()).decode('utf-8')
         plt.close(fig)
@@ -31,30 +35,27 @@ def plot_to_base64(fig):
         return ""
 
 # ==========================================
-# 🏠 窗口 A：给宝宝你的 (只出表格，保持原样)
-# 接口地址: /analyze_patent
+# 🏠 窗口 A：纯净表格版 (你的)
+# 接口: /analyze_patent
 # ==========================================
 @app.post("/analyze_patent")
 async def analyze_patent(input: FileInput):
-    print(f">>> [YOUR BOT] 处理表格请求: {input.file_url}")
-    # 这里的 mode="table_only" 保证了不画图，只出表格
+    print(f">>> [Patent] Processing: {input.file_url}")
     return await process_data(input.file_url, mode="table_only")
 
 # ==========================================
-# 🎨 窗口 B：给同学们的 (包含可视化)
-# 接口地址: /analyze_visual
+# 🎨 窗口 B：可视化版 (带图的)
+# 接口: /analyze_visual
 # ==========================================
 @app.post("/analyze_visual")
 async def analyze_visual(input: FileInput):
-    print(f">>> [CLASSMATE BOT] 处理可视化请求: {input.file_url}")
-    # 这里的 mode="with_visual" 会触发画图逻辑
+    print(f">>> [Visual] Processing: {input.file_url}")
     return await process_data(input.file_url, mode="with_visual")
 
 # ==========================================
-# ⚙️ 核心处理逻辑 (共用的大脑)
+# ⚙️ 核心处理逻辑
 # ==========================================
 async def process_data(file_url, mode):
-    # 【修复点】：try 必须配合 except 使用
     try:
         response = requests.get(file_url)
         content = response.content
@@ -103,10 +104,11 @@ async def process_data(file_url, mode):
                 desc = row['IPC主分类-部(释义)'] if 'IPC主分类-部(释义)' in cols else ""
                 ipc_rows.append([sec, desc, row['count'], row['percent_str']])
             
-            # 只有模式为 with_visual 时才画饼图
+            # === 画饼图 (缩小尺寸) ===
             if mode == "with_visual":
                 try:
-                    fig, ax = plt.subplots(figsize=(6, 6))
+                    # 修改：将尺寸从 (6,6) 缩小到 (4,4)
+                    fig, ax = plt.subplots(figsize=(4, 4))
                     labels = []
                     for i, row in ipc_counts.iterrows():
                         label = str(row['IPC主分类-部'])
@@ -114,7 +116,7 @@ async def process_data(file_url, mode):
                             label += f": {str(row['IPC主分类-部(释义)'])}"
                         labels.append(label)
                     ax.pie(ipc_counts['count'], labels=labels, autopct='%1.1f%%', startangle=90)
-                    ax.set_title('IPC 主分类分布占比')
+                    ax.set_title('IPC 主分类分布占比', fontsize=10)
                     ipc_pie_img = plot_to_base64(fig)
                 except: pass
 
@@ -131,17 +133,19 @@ async def process_data(file_url, mode):
             for i, row in inv_counts.head(20).iterrows():
                 inv_rows.append([row['name'], row['count']])
             
-            # 只有模式为 with_visual 时才画词云
+            # === 画词云 (缩小尺寸) ===
             if mode == "with_visual":
                 try:
                     inv_freq_dict = inv_exploded.value_counts().to_dict()
                     if inv_freq_dict:
-                        wc = WordCloud(font_path='simhei.ttf', width=800, height=400, background_color='white')
+                        # 修改：减小画布分辨率
+                        wc = WordCloud(font_path='simhei.ttf', width=500, height=300, background_color='white')
                         wc.generate_from_frequencies(inv_freq_dict)
-                        fig_cloud, ax_cloud = plt.subplots(figsize=(8, 4))
+                        # 修改：将绘图尺寸从 (8,4) 缩小到 (5,3)
+                        fig_cloud, ax_cloud = plt.subplots(figsize=(5, 3))
                         ax_cloud.imshow(wc, interpolation='bilinear')
                         ax_cloud.axis('off')
-                        ax_cloud.set_title('主要发明人词云')
+                        ax_cloud.set_title('主要发明人词云', fontsize=10)
                         inv_cloud_img = plot_to_base64(fig_cloud)
                 except: pass
 
@@ -149,9 +153,7 @@ async def process_data(file_url, mode):
         hv_rows = []
         if '合享价值度' in cols:
             df['score_num'] = pd.to_numeric(df['合享价值度'], errors='coerce').fillna(0)
-            # 筛选：分数>=9 且 包含“授权”
             hv_df = df[(df['score_num'] >= 9) & (df['专利类型'].astype(str).str.contains("授权"))].copy()
-            
             if '新兴产业分类' in cols and not hv_df.empty:
                 hv_df['temp_industry'] = hv_df['新兴产业分类'].astype(str).str.replace(';', ',').str.replace('，', ',')
                 hv_df['temp_industry_list'] = hv_df['temp_industry'].str.split(',')
@@ -188,7 +190,6 @@ async def process_data(file_url, mode):
         for i, r in enumerate(ipc_rows, 1):
             md1 += f"| {i} | {r[0]} | {r[1]} | {r[2]} | {r[3]} |\n"
         
-        # [同学们特供] IPC饼图
         if mode == "with_visual" and ipc_pie_img:
             md1 += f"\n\n#### IPC分布可视化\n![]({ipc_pie_img})\n"
 
@@ -197,7 +198,6 @@ async def process_data(file_url, mode):
         else:
             for r in inv_rows: md2 += f"| {r[0]} | {r[1]} |\n"
         
-        # [同学们特供] 发明人词云
         if mode == "with_visual" and inv_cloud_img:
             md2 += f"\n\n#### 发明人词云\n![]({inv_cloud_img})\n"
 
@@ -212,7 +212,6 @@ async def process_data(file_url, mode):
 
         return {"report_part1": md1, "report_part2": md2, "report_part3": md3}
 
-    # 【这里就是刚才漏掉的尾巴！】
     except Exception as e:
         traceback.print_exc()
         return {"report_part1": f"❌ 处理出错: {str(e)}", "report_part2": "", "report_part3": ""}
