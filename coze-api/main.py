@@ -12,7 +12,7 @@ class FileInput(BaseModel):
 
 @app.post("/analyze_patent")
 async def analyze_patent(input: FileInput):
-    print(f">>> [Updated-Logic] 开始处理: {input.file_url}")
+    print(f">>> [Simple-HighValue] 开始处理: {input.file_url}")
     try:
         # 1. 下载与读取
         response = requests.get(input.file_url)
@@ -69,58 +69,50 @@ async def analyze_patent(input: FileInput):
         for i, r in enumerate(ipc_rows, 1):
             md1 += f"| {i} | {r[0]} | {r[1]} | {r[2]} | {r[3]} |\n"
 
-        # ==================== 3. 主要发明人 (新逻辑!) ====================
+        # ==================== 3. 主要发明人 (保持不变) ====================
         inv_rows = []
         if '发明人' in cols:
-            # 1. 预处理：把中文逗号替换为英文分号，统一分隔符
             temp_inv = df['发明人'].astype(str).str.replace('，', ';').str.replace(',', ';')
-            # 2. 拆分：一行变多行
             inv_exploded = temp_inv.str.split(';').explode().str.strip()
-            # 3. 过滤：去掉空值和 'nan'
-            inv_exploded = inv_exploded[
-                (inv_exploded.notna()) & 
-                (inv_exploded != '') & 
-                (inv_exploded != 'nan')
-            ]
-            # 4. 统计频次
+            inv_exploded = inv_exploded[(inv_exploded.notna()) & (inv_exploded != '') & (inv_exploded != 'nan')]
             inv_counts = inv_exploded.value_counts().reset_index()
-            inv_counts.columns = ['name', 'count'] # 重命名列
+            inv_counts.columns = ['name', 'count'] 
             
-            # 5. 取前 20 名 (防止列表过长)
             for i, row in inv_counts.head(20).iterrows():
                 inv_rows.append([row['name'], row['count']])
 
-        # ==================== 4. 高价值 (筛选授权 + 拆分产业) ====================
+        # ==================== 4. 高价值 (修改版：简化清单) ====================
         hv_rows = []
         if '合享价值度' in cols and '专利类型' in cols:
             df['score_num'] = pd.to_numeric(df['合享价值度'], errors='coerce').fillna(0)
             
-            # 【核心修改】：筛选 >=9 分 AND 专利类型包含 "授权"
+            # 1. 筛选逻辑：分数>=9 且 包含"授权"
             hv_df = df[
                 (df['score_num'] >= 9) & 
                 (df['专利类型'].astype(str).str.contains("授权"))
             ].copy()
             
-            if '新兴产业分类' in cols and not hv_df.empty:
-                # 拆分产业逻辑 (保持不变)
-                hv_df['temp_industry'] = hv_df['新兴产业分类'].astype(str).str.replace(';', ',').str.replace('，', ',')
-                hv_df['temp_industry_list'] = hv_df['temp_industry'].str.split(',')
-                hv_exploded = hv_df.explode('temp_industry_list')
-                hv_exploded['single_industry'] = hv_exploded['temp_industry_list'].str.strip()
-                hv_exploded = hv_exploded[(hv_exploded['single_industry'].notna()) & (hv_exploded['single_industry'] != '') & (hv_exploded['single_industry'] != 'nan')]
-                
-                ind_counts = hv_exploded['single_industry'].value_counts()
-                hv_exploded['industry_fmt'] = hv_exploded['single_industry'].apply(lambda x: f"{x} ({ind_counts.get(x, 0)}件)")
-                hv_exploded = hv_exploded.sort_values(by=['industry_fmt', '公开（公告）号'], ascending=[True, False])
-                
-                target_map = {'公开号': '公开（公告）号', '标题': '标题 (中文)', '发明人': '发明人'}
-                for _, row in hv_exploded.iterrows():
-                    vals = [row['industry_fmt']]
-                    for k, v in target_map.items():
-                        vals.append(str(row.get(v, "")) if pd.notna(row.get(v)) else "")
-                    hv_rows.append(vals)
+            # 2. 如果有数据，直接提取字段，不进行拆分统计
+            if not hv_df.empty:
+                # 尝试按价值度降序排列（可选，这样高分的在前）
+                hv_df = hv_df.sort_values(by='score_num', ascending=False)
 
-        # 生成第二部分报告 (主要发明人 + 高价值)
+                # 遍历生成行数据 (序号从1开始)
+                for i, (_, row) in enumerate(hv_df.iterrows(), 1):
+                    # 获取字段，兼容不同列名写法
+                    title = str(row.get('标题 (中文)', row.get('标题', '')))
+                    pub_no = str(row.get('公开（公告）号', row.get('公开号', '')))
+                    industry = str(row.get('新兴产业分类', '-'))
+                    inventor = str(row.get('发明人', ''))
+                    
+                    # 简单清洗 NaN
+                    if industry == 'nan': industry = '-'
+                    if title == 'nan': title = '-'
+
+                    # 按照：序号、标题、公开号、新兴产业分类、发明人 顺序添加
+                    hv_rows.append([i, title, pub_no, industry, inventor])
+
+        # 生成第二部分报告
         md2 = "### 3. 主要发明人 (Top 20)\n| 发明人 | 发明频率 |\n| :--- | :--- |\n"
         if not inv_rows:
             md2 += "| 暂无数据 | 0 |\n"
@@ -128,12 +120,14 @@ async def analyze_patent(input: FileInput):
             for r in inv_rows:
                 md2 += f"| {r[0]} | {r[1]} |\n"
         
-        md2 += "\n### 4. 高价值授权专利推荐 (>=9分)\n| 新兴产业分类 | 公开号 | 标题 | 发明人 |\n| :--- | :--- | :--- | :--- |\n"
+        # 修改表头以匹配新逻辑
+        md2 += "\n### 4. 高价值授权专利推荐 (>=9分)\n| 序号 | 标题 | 公开号 | 新兴产业分类 | 发明人 |\n| :--- | :--- | :--- | :--- | :--- |\n"
         if not hv_rows:
-            md2 += "| 暂无符合条件的授权专利 | - | - | - |\n"
+            md2 += "| - | 暂无符合条件的授权专利 | - | - | - |\n"
         else:
             for r in hv_rows:
-                md2 += f"| {r[0]} | {r[1]} | {r[2]} | {r[3]} |\n"
+                # r[0]=序号, r[1]=标题, r[2]=公开号, r[3]=产业, r[4]=发明人
+                md2 += f"| {r[0]} | {r[1]} | {r[2]} | {r[3]} | {r[4]} |\n"
 
         # ==================== 5. 转让 (保持不变) ====================
         tf_rows = []
